@@ -17,7 +17,6 @@ private final class Switcher: NSObject, NSApplicationDelegate {
     private var windows = [Window]()
     private var windowOrder = [Window]()
     private var scroll: NSScrollView?
-    private var scrollOrigin = NSPoint.zero
     private var rows = [NSView]()
     private var labels = [NSTextField]()
     private var selected = 0
@@ -82,8 +81,8 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             let token = generation
             let order = windowOrder
             DispatchQueue.global(qos: .userInitiated).async {
-                let result = Self.enumerateWindows(order: order)
-                DispatchQueue.main.async { self.loaded(result, token: token) }
+                let found = Self.enumerateWindows(order: order)
+                DispatchQueue.main.async { self.loaded(found, token: token) }
             }
             return
         }
@@ -93,9 +92,8 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         draw()
     }
 
-    private func loaded(_ result: (windows: [Window], focusedIndex: Int), token: Int) {
+    private func loaded(_ found: [Window], token: Int) {
         guard token == generation else { return }
-        let found = result.windows
         windows = found
         windowOrder = found
         scroll = nil
@@ -103,13 +101,13 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         labels.removeAll()
         loading = false
         guard !found.isEmpty else { cancel(); return }
-        selected = Self.wrap(result.focusedIndex + pendingSteps, found.count)
+        selected = Self.wrap(pendingSteps, found.count)
         if optionHeld { draw() } else { finish() }
     }
 
     private static func wrap(_ value: Int, _ count: Int) -> Int { ((value % count) + count) % count }
 
-    private static func enumerateWindows(order: [Window]) -> (windows: [Window], focusedIndex: Int) {
+    private static func enumerateWindows(order: [Window]) -> [Window] {
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
         var found = [Window]()
         for app in apps {
@@ -133,10 +131,6 @@ private final class Switcher: NSObject, NSApplicationDelegate {
                   let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
             return (value as! AXUIElement)
         }
-        if order.isEmpty, let front, let focused,
-           let index = found.firstIndex(where: { $0.app.processIdentifier == front.processIdentifier && CFEqual($0.element, focused) }) {
-            found.insert(found.remove(at: index), at: 0)
-        }
         if !order.isEmpty {
             var remaining = found
             found = order.compactMap { old in
@@ -145,11 +139,13 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             }
             found.append(contentsOf: remaining)
         }
-        let focusedIndex = found.firstIndex { window in
+        if let focusedIndex = found.firstIndex(where: { window in
             guard let front, let focused else { return false }
             return window.app.processIdentifier == front.processIdentifier && CFEqual(window.element, focused)
-        } ?? 0
-        return (found, focusedIndex)
+        }) {
+            found.insert(found.remove(at: focusedIndex), at: 0)
+        }
+        return found
     }
 
     private func draw() {
@@ -199,8 +195,6 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         }
         scroll.documentView = document
         panel.contentView = scroll
-        scroll.contentView.scroll(to: scrollOrigin)
-        scroll.reflectScrolledClipView(scroll.contentView)
         panel.orderFrontRegardless()
         self.panel = panel
         self.scroll = scroll
@@ -208,7 +202,6 @@ private final class Switcher: NSObject, NSApplicationDelegate {
     }
 
     private func cancel() {
-        scrollOrigin = scroll?.contentView.bounds.origin ?? scrollOrigin
         generation += 1
         optionHeld = false
         loading = false
@@ -217,10 +210,11 @@ private final class Switcher: NSObject, NSApplicationDelegate {
     }
 
     private func finish() {
-        scrollOrigin = scroll?.contentView.bounds.origin ?? scrollOrigin
         panel?.orderOut(nil)
         guard windows.indices.contains(selected) else { cancel(); return }
         let window = windows[selected]
+        windowOrder = windows
+        windowOrder.insert(windowOrder.remove(at: selected), at: 0)
         windows.removeAll()
         DispatchQueue.global(qos: .userInitiated).async {
             var minimized: CFTypeRef?
