@@ -7,16 +7,24 @@ private struct Window {
     let title: String
 }
 
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 private final class Switcher: NSObject, NSApplicationDelegate {
     private var tap: CFMachPort?
     private var panel: NSPanel?
     private var windows = [Window]()
+    private var windowOrder = [Window]()
+    private var scroll: NSScrollView?
+    private var scrollOrigin = NSPoint.zero
+    private var rows = [NSView]()
+    private var labels = [NSTextField]()
     private var selected = 0
     private var pendingSteps = 0
     private var optionHeld = false
     private var loading = false
     private var generation = 0
-    private var previous: Window?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard AXIsProcessTrusted() else {
@@ -72,10 +80,10 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             pendingSteps = step
             generation += 1
             let token = generation
-            let last = previous
+            let order = windowOrder
             DispatchQueue.global(qos: .userInitiated).async {
-                let found = Self.enumerateWindows(previous: last)
-                DispatchQueue.main.async { self.loaded(found, token: token) }
+                let result = Self.enumerateWindows(order: order)
+                DispatchQueue.main.async { self.loaded(result, token: token) }
             }
             return
         }
@@ -85,18 +93,23 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         draw()
     }
 
-    private func loaded(_ found: [Window], token: Int) {
+    private func loaded(_ result: (windows: [Window], focusedIndex: Int), token: Int) {
         guard token == generation else { return }
+        let found = result.windows
         windows = found
+        windowOrder = found
+        scroll = nil
+        rows.removeAll()
+        labels.removeAll()
         loading = false
         guard !found.isEmpty else { cancel(); return }
-        selected = Self.wrap(pendingSteps, found.count)
+        selected = Self.wrap(result.focusedIndex + pendingSteps, found.count)
         if optionHeld { draw() } else { finish() }
     }
 
     private static func wrap(_ value: Int, _ count: Int) -> Int { ((value % count) + count) % count }
 
-    private static func enumerateWindows(previous: Window?) -> [Window] {
+    private static func enumerateWindows(order: [Window]) -> (windows: [Window], focusedIndex: Int) {
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
         var found = [Window]()
         for app in apps {
@@ -120,17 +133,34 @@ private final class Switcher: NSObject, NSApplicationDelegate {
                   let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
             return (value as! AXUIElement)
         }
-        if let front, let focused, let index = found.firstIndex(where: { $0.app.processIdentifier == front.processIdentifier && CFEqual($0.element, focused) }) {
+        if order.isEmpty, let front, let focused,
+           let index = found.firstIndex(where: { $0.app.processIdentifier == front.processIdentifier && CFEqual($0.element, focused) }) {
             found.insert(found.remove(at: index), at: 0)
         }
-        if let previous, let index = found.firstIndex(where: { $0.app.processIdentifier == previous.app.processIdentifier && CFEqual($0.element, previous.element) }), index > 1 {
-            found.insert(found.remove(at: index), at: 1)
+        if !order.isEmpty {
+            var remaining = found
+            found = order.compactMap { old in
+                guard let index = remaining.firstIndex(where: { $0.app.processIdentifier == old.app.processIdentifier && CFEqual($0.element, old.element) }) else { return nil }
+                return remaining.remove(at: index)
+            }
+            found.append(contentsOf: remaining)
         }
-        return found
+        let focusedIndex = found.firstIndex { window in
+            guard let front, let focused else { return false }
+            return window.app.processIdentifier == front.processIdentifier && CFEqual(window.element, focused)
+        } ?? 0
+        return (found, focusedIndex)
     }
 
     private func draw() {
-        panel?.orderOut(nil)
+        if let scroll, rows.count == windows.count {
+            for index in rows.indices {
+                rows[index].layer?.backgroundColor = (index == selected ? NSColor.controlAccentColor.withAlphaComponent(0.8) : .clear).cgColor
+                labels[index].textColor = index == selected ? .white : .labelColor
+            }
+            if let row = rows[safe: selected] { scroll.contentView.scrollToVisible(row.frame) }
+            return
+        }
         let visibleCount = min(windows.count, 12)
         let height = CGFloat(visibleCount * 44 + 16)
         let width: CGFloat = 520
@@ -146,12 +176,12 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         scroll.hasVerticalScroller = windows.count > visibleCount
         scroll.drawsBackground = false
-        let document = NSView(frame: NSRect(x: 0, y: 0, width: width, height: CGFloat(windows.count * 44 + 16)))
+        let document = FlippedView(frame: NSRect(x: 0, y: 0, width: width, height: CGFloat(windows.count * 44 + 16)))
         document.wantsLayer = true
         document.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.97).cgColor
         document.layer?.cornerRadius = 12
         for (index, window) in windows.enumerated() {
-            let row = NSView(frame: NSRect(x: 8, y: document.frame.height - CGFloat((index + 1) * 44) - 8, width: width - 16, height: 42))
+            let row = NSView(frame: NSRect(x: 8, y: CGFloat(index * 44 + 8), width: width - 16, height: 42))
             row.wantsLayer = true
             row.layer?.backgroundColor = (index == selected ? NSColor.controlAccentColor.withAlphaComponent(0.8) : .clear).cgColor
             row.layer?.cornerRadius = 7
@@ -164,15 +194,21 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             label.textColor = index == selected ? .white : .labelColor
             row.addSubview(label)
             document.addSubview(row)
+            rows.append(row)
+            labels.append(label)
         }
         scroll.documentView = document
         panel.contentView = scroll
+        scroll.contentView.scroll(to: scrollOrigin)
+        scroll.reflectScrolledClipView(scroll.contentView)
         panel.orderFrontRegardless()
         self.panel = panel
+        self.scroll = scroll
         if let row = document.subviews[safe: selected] { scroll.contentView.scrollToVisible(row.frame) }
     }
 
     private func cancel() {
+        scrollOrigin = scroll?.contentView.bounds.origin ?? scrollOrigin
         generation += 1
         optionHeld = false
         loading = false
@@ -181,10 +217,10 @@ private final class Switcher: NSObject, NSApplicationDelegate {
     }
 
     private func finish() {
+        scrollOrigin = scroll?.contentView.bounds.origin ?? scrollOrigin
         panel?.orderOut(nil)
         guard windows.indices.contains(selected) else { cancel(); return }
         let window = windows[selected]
-        previous = window
         windows.removeAll()
         DispatchQueue.global(qos: .userInitiated).async {
             var minimized: CFTypeRef?
