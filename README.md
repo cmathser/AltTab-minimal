@@ -14,6 +14,8 @@ The result is `build/OptionTab.app`. Set `CODE_SIGN_IDENTITY` to a local Apple D
 
 ## Run
 
+Applications are ordered by their most recent system activation, including mouse clicks and Command-Tab. Windows from the same app are grouped together. The list stays fixed while Option is held and refreshes on the next invocation. At startup, visible window stacking order provides the initial order; macOS does not expose the Dock switcher's complete earlier activation history through these APIs. Apps without accessible windows are omitted, so this window list can have different entries from the system's app switcher.
+
 Quit AltTab before running OptionTab because both use Option-Tab. Open `build/OptionTab.app`, grant Accessibility in System Settings if asked, then open it again. OptionTab needs Accessibility to read and focus windows. It does not ask for Screen Recording because it shows titles and icons rather than screenshots. To stop it, quit the `OptionTab` process in Activity Monitor.
 
 The app uses public AppKit, Core Graphics, and Accessibility APIs. Some apps' protected or unusual windows may not be listed or focused. For startup at login, copy `LaunchAgent.plist` to `~/Library/LaunchAgents/local.optiontab.minimal.plist` and load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.optiontab.minimal.plist` after granting Accessibility.

@@ -16,6 +16,8 @@ private final class Switcher: NSObject, NSApplicationDelegate {
     private var panel: NSPanel?
     private var windows = [Window]()
     private var windowOrder = [Window]()
+    private var applicationOrder = [pid_t]()
+    private var activationObserver: NSObjectProtocol?
     private var scroll: NSScrollView?
     private var rows = [NSView]()
     private var labels = [NSTextField]()
@@ -40,6 +42,25 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        let regularPIDs = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier))
+        let visibleWindows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        for window in visibleWindows where (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 {
+            guard let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  regularPIDs.contains(pid), !applicationOrder.contains(pid) else { continue }
+            applicationOrder.append(pid)
+        }
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self?.recordActivation(app)
+        }
+        if let front = NSWorkspace.shared.frontmostApplication { recordActivation(front) }
+    }
+
+    private func recordActivation(_ app: NSRunningApplication) {
+        guard app.activationPolicy == .regular else { return }
+        let running = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
+        applicationOrder.removeAll { $0 == app.processIdentifier || !running.contains($0) }
+        applicationOrder.insert(app.processIdentifier, at: 0)
     }
 
     private static let callback: CGEventTapCallBack = { _, type, event, pointer in
@@ -74,14 +95,16 @@ private final class Switcher: NSObject, NSApplicationDelegate {
 
     private func advance(_ step: Int) {
         if !optionHeld {
+            if let front = NSWorkspace.shared.frontmostApplication { recordActivation(front) }
             optionHeld = true
             loading = true
             pendingSteps = step
             generation += 1
             let token = generation
             let order = windowOrder
+            let apps = applicationOrder
             DispatchQueue.global(qos: .userInitiated).async {
-                let found = Self.enumerateWindows(order: order)
+                let found = Self.enumerateWindows(order: order, applicationOrder: apps)
                 DispatchQueue.main.async { self.loaded(found, token: token) }
             }
             return
@@ -107,7 +130,7 @@ private final class Switcher: NSObject, NSApplicationDelegate {
 
     private static func wrap(_ value: Int, _ count: Int) -> Int { ((value % count) + count) % count }
 
-    private static func enumerateWindows(order: [Window]) -> [Window] {
+    private static func enumerateWindows(order: [Window], applicationOrder: [pid_t]) -> [Window] {
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
         var found = [Window]()
         for app in apps {
@@ -139,6 +162,7 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             }
             found.append(contentsOf: remaining)
         }
+        found = sortWindows(found, applicationOrder: applicationOrder)
         if let focusedIndex = found.firstIndex(where: { window in
             guard let front, let focused else { return false }
             return window.app.processIdentifier == front.processIdentifier && CFEqual(window.element, focused)
@@ -146,6 +170,20 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             found.insert(found.remove(at: focusedIndex), at: 0)
         }
         return found
+    }
+
+    private static func sortWindows(_ windows: [Window], applicationOrder: [pid_t]) -> [Window] {
+        // Follow all system app activations, including mouse clicks and Command-Tab.
+        // The original index preserves window order within each application.
+        var ranks = Dictionary(uniqueKeysWithValues: applicationOrder.enumerated().map { ($0.element, $0.offset) })
+        for window in windows where ranks[window.app.processIdentifier] == nil {
+            ranks[window.app.processIdentifier] = ranks.count
+        }
+        return windows.enumerated().sorted { left, right in
+            let leftRank = ranks[left.element.app.processIdentifier] ?? Int.max
+            let rightRank = ranks[right.element.app.processIdentifier] ?? Int.max
+            return leftRank == rightRank ? left.offset < right.offset : leftRank < rightRank
+        }.map(\.element)
     }
 
     private func draw() {
@@ -213,6 +251,7 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         panel?.orderOut(nil)
         guard windows.indices.contains(selected) else { cancel(); return }
         let window = windows[selected]
+        recordActivation(window.app)
         windowOrder = windows
         windowOrder.insert(windowOrder.remove(at: selected), at: 0)
         windows.removeAll()
