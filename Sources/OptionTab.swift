@@ -5,7 +5,7 @@ private struct Window {
     let app: NSRunningApplication
     let element: AXUIElement?
     let title: String
-    var dockItem: AXUIElement? = nil
+    var isApplicationEntry = false
 
     var applicationKey: String { app.bundleURL?.standardizedFileURL.path ?? "pid:\(app.processIdentifier)" }
 
@@ -201,7 +201,7 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             represented.insert(key)
             let instances = apps.filter { applicationKey($0) == key }
             let target = instances.first(where: \.isActive) ?? instances.first(where: { $0.activationPolicy == .regular }) ?? app
-            found.append(Window(app: target, element: nil, title: target.localizedName ?? "App", dockItem: dock[key]))
+            found.append(Window(app: target, element: nil, title: target.localizedName ?? "App"))
         }
         let front = NSWorkspace.shared.frontmostApplication
         let focused = front.flatMap { app -> AXUIElement? in
@@ -242,8 +242,9 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         var seen = Set<String>()
         var primary = [Window]()
         var additional = [Window]()
-        for window in sorted {
-            if seen.insert(window.applicationKey).inserted { primary.append(window) }
+        for var window in sorted {
+            window.isApplicationEntry = seen.insert(window.applicationKey).inserted
+            if window.isApplicationEntry { primary.append(window) }
             else { additional.append(window) }
         }
         return primary + additional
@@ -285,7 +286,7 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             let icon = NSImageView(frame: NSRect(x: 9, y: 5, width: 32, height: 32))
             icon.image = window.app.bundleURL.map { NSWorkspace.shared.icon(forFile: $0.path) } ?? window.app.icon
             row.addSubview(icon)
-            let text = window.element == nil ? window.title : "\(window.app.localizedName ?? "App") — \(window.title)"
+            let text = window.isApplicationEntry ? (window.app.localizedName ?? window.title) : "\(window.app.localizedName ?? "App") — \(window.title)"
             let label = NSTextField(labelWithString: text)
             label.frame = NSRect(x: 50, y: 10, width: width - 75, height: 24)
             label.lineBreakMode = .byTruncatingTail
@@ -311,6 +312,26 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         panel?.orderOut(nil)
     }
 
+    private static func activateApplication(_ app: NSRunningApplication) {
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        let focused = attribute(axApp, kAXFocusedWindowAttribute) ?? attribute(axApp, kAXMainWindowAttribute)
+        let elements = attribute(axApp, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        _ = app.activate(options: [.activateAllWindows])
+        // Some apps do not raise their secondary windows on activation.
+        // Keep minimized windows minimized and restore the existing focus last.
+        for element in elements.reversed() {
+            if let focused, CFEqual(element, focused) { continue }
+            guard attribute(element, kAXMinimizedAttribute) as? Bool != true else { continue }
+            AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+        }
+        if let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() {
+            let element = focused as! AXUIElement
+            if attribute(element, kAXMinimizedAttribute) as? Bool != true {
+                AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+            }
+        }
+    }
+
     private func finish() {
         panel?.orderOut(nil)
         guard windows.indices.contains(selected) else { cancel(); return }
@@ -319,9 +340,10 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         windowOrder.insert(windowOrder.remove(at: selected), at: 0)
         windows.removeAll()
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let element = window.element else {
-                if let item = window.dockItem { AXUIElementPerformAction(item, kAXPressAction as CFString) }
-                else { _ = window.app.activate(options: []) }
+            // Application entries bring the app's windows forward together.
+            // Explicit window entries focus only their selected window.
+            guard !window.isApplicationEntry, let element = window.element else {
+                Self.activateApplication(window.app)
                 return
             }
             var minimized: CFTypeRef?
