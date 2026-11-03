@@ -3,8 +3,20 @@ import ApplicationServices
 
 private struct Window {
     let app: NSRunningApplication
-    let element: AXUIElement
+    let element: AXUIElement?
     let title: String
+    var dockItem: AXUIElement? = nil
+
+    var applicationKey: String { app.bundleURL?.standardizedFileURL.path ?? "pid:\(app.processIdentifier)" }
+
+    func matches(_ other: Window) -> Bool {
+        guard applicationKey == other.applicationKey else { return false }
+        switch (element, other.element) {
+        case let (left?, right?): return CFEqual(left, right)
+        case (nil, nil): return true
+        default: return false
+        }
+    }
 }
 
 private final class FlippedView: NSView {
@@ -16,7 +28,7 @@ private final class Switcher: NSObject, NSApplicationDelegate {
     private var panel: NSPanel?
     private var windows = [Window]()
     private var windowOrder = [Window]()
-    private var applicationOrder = [pid_t]()
+    private var applicationOrder = [String]()
     private var activationObserver: NSObjectProtocol?
     private var scroll: NSScrollView?
     private var rows = [NSView]()
@@ -46,8 +58,9 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         let visibleWindows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         for window in visibleWindows where (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 {
             guard let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                  regularPIDs.contains(pid), !applicationOrder.contains(pid) else { continue }
-            applicationOrder.append(pid)
+                  regularPIDs.contains(pid), let app = NSRunningApplication(processIdentifier: pid) else { continue }
+            let key = Self.applicationKey(app)
+            if !applicationOrder.contains(key) { applicationOrder.append(key) }
         }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -57,10 +70,35 @@ private final class Switcher: NSObject, NSApplicationDelegate {
     }
 
     private func recordActivation(_ app: NSRunningApplication) {
-        guard app.activationPolicy == .regular else { return }
-        let running = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
-        applicationOrder.removeAll { $0 == app.processIdentifier || !running.contains($0) }
-        applicationOrder.insert(app.processIdentifier, at: 0)
+        guard app.activationPolicy != .prohibited, app.bundleIdentifier != "local.optiontab.minimal" else { return }
+        let key = Self.applicationKey(app)
+        let running = Set(NSWorkspace.shared.runningApplications.map(Self.applicationKey))
+        applicationOrder.removeAll { $0 == key || !running.contains($0) }
+        applicationOrder.insert(key, at: 0)
+    }
+
+    private static func applicationKey(_ app: NSRunningApplication) -> String {
+        app.bundleURL?.standardizedFileURL.path ?? "pid:\(app.processIdentifier)"
+    }
+
+    private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+        return value
+    }
+
+    private static func dockApplications() -> [String: AXUIElement] {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return [:] }
+        var items = [String: AXUIElement]()
+        let root = AXUIElementCreateApplication(dock.processIdentifier)
+        for list in attribute(root, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
+            for item in attribute(list, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
+                guard attribute(item, kAXSubroleAttribute) as? String == "AXApplicationDockItem",
+                      let url = attribute(item, kAXURLAttribute) as? URL else { continue }
+                items[url.standardizedFileURL.path] = item
+            }
+        }
+        return items
     }
 
     private static let callback: CGEventTapCallBack = { _, type, event, pointer in
@@ -130,14 +168,21 @@ private final class Switcher: NSObject, NSApplicationDelegate {
 
     private static func wrap(_ value: Int, _ count: Int) -> Int { ((value % count) + count) % count }
 
-    private static func enumerateWindows(order: [Window], applicationOrder: [pid_t]) -> [Window] {
-        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+    private static func enumerateWindows(order: [Window], applicationOrder: [String]) -> [Window] {
+        let dock = dockApplications()
+        let apps = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleIdentifier != "local.optiontab.minimal" && ($0.activationPolicy == .regular || dock[applicationKey($0)] != nil)
+        }
         var found = [Window]()
         for app in apps {
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
-                  let elements = value as? [AXUIElement] else { continue }
+                  var elements = value as? [AXUIElement] else { continue }
+            if let preferred = attribute(axApp, kAXFocusedWindowAttribute) ?? attribute(axApp, kAXMainWindowAttribute),
+               let index = elements.firstIndex(where: { CFEqual($0, preferred) }) {
+                elements.insert(elements.remove(at: index), at: 0)
+            }
             for element in elements {
                 var role: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
@@ -146,6 +191,17 @@ private final class Switcher: NSObject, NSApplicationDelegate {
                 _ = AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
                 found.append(Window(app: app, element: element, title: (title as? String).flatMap { $0.isEmpty ? nil : $0 } ?? app.localizedName ?? "Window"))
             }
+        }
+        // Dock applications can be switchable even when AXWindows is empty or
+        // their activation policy is accessory (for example WeChatAppEx).
+        var represented = Set(found.map(\.applicationKey))
+        for app in apps {
+            let key = applicationKey(app)
+            guard !represented.contains(key) else { continue }
+            represented.insert(key)
+            let instances = apps.filter { applicationKey($0) == key }
+            let target = instances.first(where: \.isActive) ?? instances.first(where: { $0.activationPolicy == .regular }) ?? app
+            found.append(Window(app: target, element: nil, title: target.localizedName ?? "App", dockItem: dock[key]))
         }
         let front = NSWorkspace.shared.frontmostApplication
         let focused = front.flatMap { app -> AXUIElement? in
@@ -157,33 +213,40 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         if !order.isEmpty {
             var remaining = found
             found = order.compactMap { old in
-                guard let index = remaining.firstIndex(where: { $0.app.processIdentifier == old.app.processIdentifier && CFEqual($0.element, old.element) }) else { return nil }
+                guard let index = remaining.firstIndex(where: { $0.matches(old) }) else { return nil }
                 return remaining.remove(at: index)
             }
             found.append(contentsOf: remaining)
         }
-        found = sortWindows(found, applicationOrder: applicationOrder)
         if let focusedIndex = found.firstIndex(where: { window in
-            guard let front, let focused else { return false }
-            return window.app.processIdentifier == front.processIdentifier && CFEqual(window.element, focused)
+            guard let front, let focused, let element = window.element else { return false }
+            return applicationKey(window.app) == applicationKey(front) && CFEqual(element, focused)
         }) {
             found.insert(found.remove(at: focusedIndex), at: 0)
         }
-        return found
+        return sortWindows(found, applicationOrder: applicationOrder)
     }
 
-    private static func sortWindows(_ windows: [Window], applicationOrder: [pid_t]) -> [Window] {
+    private static func sortWindows(_ windows: [Window], applicationOrder: [String]) -> [Window] {
         // Follow all system app activations, including mouse clicks and Command-Tab.
         // The original index preserves window order within each application.
         var ranks = Dictionary(uniqueKeysWithValues: applicationOrder.enumerated().map { ($0.element, $0.offset) })
-        for window in windows where ranks[window.app.processIdentifier] == nil {
-            ranks[window.app.processIdentifier] = ranks.count
+        for window in windows where ranks[window.applicationKey] == nil {
+            ranks[window.applicationKey] = ranks.count
         }
-        return windows.enumerated().sorted { left, right in
-            let leftRank = ranks[left.element.app.processIdentifier] ?? Int.max
-            let rightRank = ranks[right.element.app.processIdentifier] ?? Int.max
+        let sorted = windows.enumerated().sorted { left, right in
+            let leftRank = ranks[left.element.applicationKey] ?? Int.max
+            let rightRank = ranks[right.element.applicationKey] ?? Int.max
             return leftRank == rightRank ? left.offset < right.offset : leftRank < rightRank
         }.map(\.element)
+        var seen = Set<String>()
+        var primary = [Window]()
+        var additional = [Window]()
+        for window in sorted {
+            if seen.insert(window.applicationKey).inserted { primary.append(window) }
+            else { additional.append(window) }
+        }
+        return primary + additional
     }
 
     private func draw() {
@@ -220,9 +283,10 @@ private final class Switcher: NSObject, NSApplicationDelegate {
             row.layer?.backgroundColor = (index == selected ? NSColor.controlAccentColor.withAlphaComponent(0.8) : .clear).cgColor
             row.layer?.cornerRadius = 7
             let icon = NSImageView(frame: NSRect(x: 9, y: 5, width: 32, height: 32))
-            icon.image = window.app.icon
+            icon.image = window.app.bundleURL.map { NSWorkspace.shared.icon(forFile: $0.path) } ?? window.app.icon
             row.addSubview(icon)
-            let label = NSTextField(labelWithString: "\(window.app.localizedName ?? "App") — \(window.title)")
+            let text = window.element == nil ? window.title : "\(window.app.localizedName ?? "App") — \(window.title)"
+            let label = NSTextField(labelWithString: text)
             label.frame = NSRect(x: 50, y: 10, width: width - 75, height: 24)
             label.lineBreakMode = .byTruncatingTail
             label.textColor = index == selected ? .white : .labelColor
@@ -251,19 +315,23 @@ private final class Switcher: NSObject, NSApplicationDelegate {
         panel?.orderOut(nil)
         guard windows.indices.contains(selected) else { cancel(); return }
         let window = windows[selected]
-        recordActivation(window.app)
         windowOrder = windows
         windowOrder.insert(windowOrder.remove(at: selected), at: 0)
         windows.removeAll()
         DispatchQueue.global(qos: .userInitiated).async {
+            guard let element = window.element else {
+                if let item = window.dockItem { AXUIElementPerformAction(item, kAXPressAction as CFString) }
+                else { _ = window.app.activate(options: []) }
+                return
+            }
             var minimized: CFTypeRef?
-            if AXUIElementCopyAttributeValue(window.element, kAXMinimizedAttribute as CFString, &minimized) == .success, minimized as? Bool == true {
-                AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            if AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimized) == .success, minimized as? Bool == true {
+                AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
             }
             _ = window.app.activate(options: [])
-            AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
-            AXUIElementSetAttributeValue(window.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-            AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(element, kAXRaiseAction as CFString)
         }
     }
 }
