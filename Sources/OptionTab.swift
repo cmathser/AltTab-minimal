@@ -313,22 +313,8 @@ private final class Switcher: NSObject, NSApplicationDelegate {
     }
 
     private static func activateApplication(_ app: NSRunningApplication) {
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        let focused = attribute(axApp, kAXFocusedWindowAttribute) ?? attribute(axApp, kAXMainWindowAttribute)
-        let elements = attribute(axApp, kAXWindowsAttribute) as? [AXUIElement] ?? []
-        _ = app.activate(options: [.activateAllWindows])
-        // Some apps do not raise their secondary windows on activation.
-        // Keep minimized windows minimized and restore the existing focus last.
-        for element in elements.reversed() {
-            if let focused, CFEqual(element, focused) { continue }
-            guard attribute(element, kAXMinimizedAttribute) as? Bool != true else { continue }
-            AXUIElementPerformAction(element, kAXRaiseAction as CFString)
-        }
-        if let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() {
-            let element = focused as! AXUIElement
-            if attribute(element, kAXMinimizedAttribute) as? Bool != true {
-                AXUIElementPerformAction(element, kAXRaiseAction as CFString)
-            }
+        if OptionTabActivateApplication(app.processIdentifier) != 0 {
+            _ = app.activate(options: [.activateAllWindows])
         }
     }
 
