@@ -211,10 +211,12 @@ private func testSchemeBMultiInstanceRegularAppsStaySeparateAndDisambiguateTitle
 
     try expectEqual(items[2].app.pid, 2001)
     try expectTrue(items[2].isApplicationEntry)
-    // Unique primary app name stays concise without window title suffix
-    try expectEqual(items[2].displayTitle, "Safari")
+    // Primary app entry also displays active window title
+    try expectEqual(items[2].secondaryTitle, "Apple Developer")
+    try expectEqual(items[2].displayTitle, "Safari — Apple Developer")
 
-    // Additional window of chrome1 follows at the end
+    // Additional window of chrome1 follows after separator boundary at index 3
+    try expectEqual(SwitcherOrdering.sectionSeparatorIndex(in: items), 3)
     try expectEqual(items[3].app.pid, 1001)
     try expectTrue(!items[3].isApplicationEntry)
     try expectEqual(items[3].displayTitle, "Google Chrome — Shopping")
@@ -347,6 +349,62 @@ private func testPreviousOrderPreservationAndFocusedWindowPromotion() throws {
     try expectTrue(!items[2].isApplicationEntry)
 }
 
+private func testUnifiedWindowTitlesDeduplicationAndSectionSeparatorBoundary() throws {
+    let wechat = RunningAppSnapshot(pid: 7001, bundlePath: "/Applications/WeChat.app", localizedName: "WeChat")
+    let finder = RunningAppSnapshot(pid: 7002, bundlePath: "/System/Library/CoreServices/Finder.app", localizedName: "Finder")
+    let preview = RunningAppSnapshot(pid: 7003, bundlePath: "/System/Applications/Preview.app", localizedName: "Preview")
+
+    // Case 1: Only primary items (same-name title deduplicated, blank title ignored, windowless app omitted) -> no separator
+    let singleWindowItems = SwitcherOrdering.buildSwitcherItems(
+        discovered: [
+            DiscoveredAppWindows(app: wechat, windows: [
+                DiscoveredWindow(token: .synthetic(100), title: "WeChat", isMinimized: false)
+            ]),
+            DiscoveredAppWindows(app: finder, windows: [
+                DiscoveredWindow(token: .synthetic(101), title: "   ", isMinimized: false)
+            ])
+        ],
+        candidateApps: [wechat, finder, preview],
+        frontmostApp: wechat,
+        frontmostFocusedWindow: .synthetic(100),
+        previousOrder: [],
+        applicationOrder: [wechat.groupKey, finder.groupKey, preview.groupKey]
+    )
+
+    try expectEqual(singleWindowItems.count, 3)
+    try expectEqual(singleWindowItems[0].secondaryTitle, nil)
+    try expectEqual(singleWindowItems[0].displayTitle, "WeChat")
+    try expectEqual(singleWindowItems[1].secondaryTitle, nil)
+    try expectEqual(singleWindowItems[1].displayTitle, "Finder")
+    try expectEqual(singleWindowItems[2].secondaryTitle, nil)
+    try expectEqual(singleWindowItems[2].displayTitle, "Preview")
+    try expectEqual(SwitcherOrdering.sectionSeparatorIndex(in: singleWindowItems), nil)
+
+    // Case 2: Presence of additional windows yields exact separator boundary index
+    let multiWindowItems = SwitcherOrdering.buildSwitcherItems(
+        discovered: [
+            DiscoveredAppWindows(app: wechat, windows: [
+                DiscoveredWindow(token: .synthetic(100), title: "WeChat", isMinimized: false)
+            ]),
+            DiscoveredAppWindows(app: finder, windows: [
+                DiscoveredWindow(token: .synthetic(101), title: "Downloads", isMinimized: false),
+                DiscoveredWindow(token: .synthetic(102), title: "Desktop", isMinimized: false)
+            ])
+        ],
+        candidateApps: [wechat, finder],
+        frontmostApp: wechat,
+        frontmostFocusedWindow: .synthetic(100),
+        previousOrder: [],
+        applicationOrder: [wechat.groupKey, finder.groupKey]
+    )
+
+    try expectEqual(multiWindowItems.count, 3)
+    try expectEqual(multiWindowItems[0].displayTitle, "WeChat")
+    try expectEqual(multiWindowItems[1].displayTitle, "Finder — Downloads")
+    try expectEqual(multiWindowItems[2].displayTitle, "Finder — Desktop")
+    try expectEqual(SwitcherOrdering.sectionSeparatorIndex(in: multiWindowItems), 2)
+}
+
 @main
 struct TestRunner {
     static func main() {
@@ -358,7 +416,8 @@ struct TestRunner {
             ("testSchemeBMultiInstanceRegularAppsStaySeparateAndDisambiguateTitles", testSchemeBMultiInstanceRegularAppsStaySeparateAndDisambiguateTitles),
             ("testAccessoryDockSubAppsMergeAndSameBundleHelpersExcluded", testAccessoryDockSubAppsMergeAndSameBundleHelpersExcluded),
             ("testAllMinimizedWindowsAttachFallbackRestoreTokenOnlyWhenNeeded", testAllMinimizedWindowsAttachFallbackRestoreTokenOnlyWhenNeeded),
-            ("testPreviousOrderPreservationAndFocusedWindowPromotion", testPreviousOrderPreservationAndFocusedWindowPromotion)
+            ("testPreviousOrderPreservationAndFocusedWindowPromotion", testPreviousOrderPreservationAndFocusedWindowPromotion),
+            ("testUnifiedWindowTitlesDeduplicationAndSectionSeparatorBoundary", testUnifiedWindowTitlesDeduplicationAndSectionSeparatorBoundary)
         ]
 
         var passed = 0

@@ -22,7 +22,16 @@ final class SwitcherPanelController {
         titleLabels.removeAll(keepingCapacity: true)
 
         let visibleCount = min(items.count, LayoutMetrics.maxVisibleRows)
-        let panelHeight = CGFloat(visibleCount) * LayoutMetrics.rowStride + LayoutMetrics.verticalPadding
+        let separatorIndex = SwitcherOrdering.sectionSeparatorIndex(in: items)
+        let visibleSeparatorHeight: CGFloat = (separatorIndex.map { $0 < visibleCount } ?? false)
+            ? LayoutMetrics.sectionSeparatorAreaHeight
+            : 0
+        let documentSeparatorHeight: CGFloat = separatorIndex != nil
+            ? LayoutMetrics.sectionSeparatorAreaHeight
+            : 0
+        let panelHeight = CGFloat(visibleCount) * LayoutMetrics.rowStride
+            + LayoutMetrics.verticalPadding
+            + visibleSeparatorHeight
         let panelWidth = LayoutMetrics.panelWidth
         let screenFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? LayoutMetrics.fallbackScreenFrame
         let panelRect = NSRect(
@@ -39,7 +48,9 @@ final class SwitcherPanelController {
         scrollView.hasVerticalScroller = items.count > visibleCount
         scrollView.drawsBackground = false
 
-        let documentHeight = CGFloat(items.count) * LayoutMetrics.rowStride + LayoutMetrics.verticalPadding
+        let documentHeight = CGFloat(items.count) * LayoutMetrics.rowStride
+            + LayoutMetrics.verticalPadding
+            + documentSeparatorHeight
         let documentView = FlippedView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: documentHeight))
         documentView.wantsLayer = true
         documentView.layer?.backgroundColor = NSColor.windowBackgroundColor
@@ -47,9 +58,35 @@ final class SwitcherPanelController {
             .cgColor
         documentView.layer?.cornerRadius = LayoutMetrics.panelCornerRadius
 
+        var resolvedSeparatorCGColor: CGColor = NSColor.separatorColor.cgColor
+        panel.effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolvedSeparatorCGColor = NSColor.separatorColor.cgColor
+        }
+
         for (index, item) in items.enumerated() {
+            if let sep = separatorIndex, index == sep {
+                let separatorOriginY = CGFloat(index) * LayoutMetrics.rowStride
+                    + LayoutMetrics.horizontalInset
+                    + floor((LayoutMetrics.sectionSeparatorAreaHeight - LayoutMetrics.sectionSeparatorThickness) / 2)
+                    - 1
+                let separatorView = NSView(
+                    frame: NSRect(
+                        x: LayoutMetrics.sectionSeparatorHorizontalInset,
+                        y: separatorOriginY,
+                        width: panelWidth - LayoutMetrics.sectionSeparatorHorizontalInset * 2,
+                        height: LayoutMetrics.sectionSeparatorThickness
+                    )
+                )
+                separatorView.wantsLayer = true
+                separatorView.layer?.backgroundColor = resolvedSeparatorCGColor
+                documentView.addSubview(separatorView)
+            }
+
             let isSelected = (index == selectedIndex)
-            let rowOriginY = CGFloat(index) * LayoutMetrics.rowStride + LayoutMetrics.horizontalInset
+            let extraOffset = (separatorIndex.map { index >= $0 } ?? false)
+                ? LayoutMetrics.sectionSeparatorAreaHeight
+                : 0
+            let rowOriginY = CGFloat(index) * LayoutMetrics.rowStride + LayoutMetrics.horizontalInset + extraOffset
             let rowFrame = NSRect(
                 x: LayoutMetrics.horizontalInset,
                 y: rowOriginY,
@@ -69,7 +106,7 @@ final class SwitcherPanelController {
             let label = NSTextField(labelWithString: item.displayTitle)
             label.frame = LayoutMetrics.labelFrame
             label.lineBreakMode = .byTruncatingTail
-            label.textColor = isSelected ? .white : .labelColor
+            label.attributedStringValue = makeTitleAttributedString(for: item, isSelected: isSelected)
             rowView.addSubview(label)
 
             documentView.addSubview(rowView)
@@ -94,7 +131,7 @@ final class SwitcherPanelController {
         for index in rowViews.indices {
             let isSelected = (index == selectedIndex)
             rowViews[index].layer?.backgroundColor = selectionBackgroundColor(isSelected: isSelected)
-            titleLabels[index].textColor = isSelected ? .white : .labelColor
+            titleLabels[index].attributedStringValue = makeTitleAttributedString(for: items[index], isSelected: isSelected)
         }
         if rowViews.indices.contains(selectedIndex) {
             scrollView.contentView.scrollToVisible(rowViews[selectedIndex].frame)
@@ -125,6 +162,40 @@ final class SwitcherPanelController {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         return panel
+    }
+
+    private func makeTitleAttributedString(for item: SwitcherItem, isSelected: Bool) -> NSAttributedString {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byTruncatingTail
+
+        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let primaryColor: NSColor = isSelected ? .white : .labelColor
+        let result = NSMutableAttributedString(
+            string: item.primaryTitle,
+            attributes: [
+                .font: font,
+                .foregroundColor: primaryColor,
+                .paragraphStyle: paragraphStyle
+            ]
+        )
+
+        if let secondaryTitle = item.secondaryTitle {
+            let secondaryColor: NSColor = isSelected
+                ? NSColor.white.withAlphaComponent(LayoutMetrics.selectedSecondaryTextAlpha)
+                : .secondaryLabelColor
+            result.append(
+                NSAttributedString(
+                    string: " — \(secondaryTitle)",
+                    attributes: [
+                        .font: font,
+                        .foregroundColor: secondaryColor,
+                        .paragraphStyle: paragraphStyle
+                    ]
+                )
+            )
+        }
+
+        return result
     }
 
     private func selectionBackgroundColor(isSelected: Bool) -> CGColor {

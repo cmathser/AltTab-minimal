@@ -47,6 +47,10 @@ enum LayoutMetrics {
     static let labelFrame = NSRect(x: 50, y: 10, width: 520 - 75, height: 24)
     static let panelBackgroundAlpha: CGFloat = 0.97
     static let selectionHighlightAlpha: CGFloat = 0.8
+    static let sectionSeparatorAreaHeight: CGFloat = 11
+    static let sectionSeparatorThickness: CGFloat = 1
+    static let sectionSeparatorHorizontalInset: CGFloat = 14
+    static let selectedSecondaryTextAlpha: CGFloat = 0.78
     static let fallbackScreenFrame = NSRect(x: 0, y: 0, width: 1280, height: 800)
 }
 
@@ -146,17 +150,24 @@ struct SwitcherItem: Sendable, Equatable {
     let title: String
     let isMinimized: Bool
     var isApplicationEntry: Bool = false
-    var hasPeerWithSameDisplayName: Bool = false
     var fallbackRestoreToken: WindowToken? = nil
 
+    var primaryTitle: String {
+        app.localizedName
+    }
+
+    var secondaryTitle: String? {
+        guard windowToken != nil else { return nil }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != app.localizedName else { return nil }
+        return trimmed
+    }
+
     var displayTitle: String {
-        if isApplicationEntry {
-            if hasPeerWithSameDisplayName, windowToken != nil, !title.isEmpty, title != app.localizedName {
-                return "\(app.localizedName) — \(title)"
-            }
-            return app.localizedName
+        if let secondaryTitle {
+            return "\(primaryTitle) — \(secondaryTitle)"
         }
-        return "\(app.localizedName) — \(title)"
+        return primaryTitle
     }
 
     func matches(_ other: SwitcherItem) -> Bool {

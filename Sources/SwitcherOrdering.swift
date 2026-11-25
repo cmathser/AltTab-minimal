@@ -221,17 +221,15 @@ enum SwitcherOrdering {
             }
         }
 
-        // Disambiguate multiple primary entries sharing the same localized app name (e.g. `open -n` instances).
-        var displayNameCounts = [String: Int]()
-        for item in primary {
-            displayNameCounts[item.app.localizedName, default: 0] += 1
-        }
-        for index in primary.indices {
-            if (displayNameCounts[primary[index].app.localizedName] ?? 0) > 1 {
-                primary[index].hasPeerWithSameDisplayName = true
-            }
-        }
-
         return primary + additional
+    }
+
+    /// Returns the index where the additional-windows section begins, or `nil` when no separator is needed.
+    static func sectionSeparatorIndex(in items: [SwitcherItem]) -> Int? {
+        guard let firstAdditional = items.firstIndex(where: { !$0.isApplicationEntry }),
+              firstAdditional > 0 else {
+            return nil
+        }
+        return firstAdditional
     }
 }
