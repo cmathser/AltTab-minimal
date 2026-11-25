@@ -7,6 +7,7 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 int32_t OptionTabActivateApplication(int32_t pid) {
+    if (pid <= 0) return paramErr;
     ProcessSerialNumber process;
     OSStatus status = GetProcessForPID(pid, &process);
     if (status != noErr) return status;
